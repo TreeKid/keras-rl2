@@ -3,6 +3,7 @@ import warnings
 from copy import deepcopy
 
 import numpy as np
+import tensorflow as tf
 from tensorflow.keras.callbacks import History
 
 from rl.callbacks import (
@@ -14,7 +15,7 @@ from rl.callbacks import (
 )
 
 
-class Agent(object):
+class Agent(tf.keras.Model):
     """Abstract base class for all implemented agents.
 
     Each agent interacts with the environment (as defined by the `Env` class) by first observing the
@@ -38,6 +39,8 @@ class Agent(object):
         processor (`Processor` instance): See [Processor](#processor) for details.
     """
     def __init__(self, processor=None):
+        super(Agent, self).__init__()
+
         self.processor = processor
         self.training = False
         self.step = 0
