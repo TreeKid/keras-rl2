@@ -149,7 +149,7 @@ class DDPGAgent(Agent):
 
         return actions
 
-    def load_weights(self, fileparewardth):
+    def load_weights(self, filepath):
         filename, extension = os.path.splitext(filepath)
         actor_filepath = filename + '_actor' + extension
         critic_filepath = filename + '_critic' + extension
