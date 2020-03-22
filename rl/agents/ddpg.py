@@ -26,9 +26,9 @@ class DDPGAgent(Agent):
                  gamma=.99, batch_size=32, nb_steps_warmup_critic=1000, nb_steps_warmup_actor=1000,
                  train_interval=1, memory_interval=1, delta_range=None, delta_clip=np.inf,
                  random_process=None, custom_model_objects={}, target_model_update=.001, **kwargs):
-        if hasattr(actor.output, '__len__') and len(actor.output) > 1:
+        if hasattr(actor.outputs, '__len__') and len(actor.outputs) > 1:
             raise ValueError('Actor "{}" has more than one output. DDPG expects an actor that has a single output.'.format(actor))
-        if hasattr(critic.output, '__len__') and len(critic.output) > 1:
+        if hasattr(critic.outputs, '__len__') and len(critic.outputs) > 1:
             raise ValueError('Critic "{}" has more than one output. DDPG expects a critic that has a single output.'.format(critic))
         if critic_action_input not in critic.input:
             raise ValueError('Critic "{}" does not have designated action input "{}".'.format(critic, critic_action_input))
@@ -70,14 +70,16 @@ class DDPGAgent(Agent):
         self.critic_action_input = critic_action_input
         self.critic_action_input_idx = self.critic.input.index(critic_action_input)
         self.memory = memory
+        self.updates_list = None
 
         # State.
         self.compiled = False
         self.reset_states()
 
-    @property
-    def uses_learning_phase(self):
-        return self.actor.uses_learning_phase or self.critic.uses_learning_phase
+    #@property
+    #def uses_learning_phase(self):
+    #    return  K.learning_phase()
+        #return self.actor.uses_learning_phase or self.critic.uses_learning_phase
 
     def compile(self, optimizer, metrics=[]):
         metrics += [mean_q]
@@ -123,36 +125,34 @@ class DDPGAgent(Agent):
             critic_optimizer = AdditionalUpdatesOptimizer(critic_optimizer, critic_updates)
         self.critic.compile(optimizer=critic_optimizer, loss=clipped_error, metrics=critic_metrics)
 
-        # Combine actor and critic so that we can get the policy gradient.
-        # Assuming critic's state inputs are the same as actor's.
-        combined_inputs = []
-        state_inputs = []
-        for i in self.critic.input:
-            if i == self.critic_action_input:
-                combined_inputs.append([])
-            else:
-                combined_inputs.append(i)
-                state_inputs.append(i)
-        combined_inputs[self.critic_action_input_idx] = self.actor(state_inputs)
-
-        combined_output = self.critic(combined_inputs)
-        self.loss = -K.mean(combined_output)
-        with self.loss.graph.as_default():
-            updates = actor_optimizer.get_updates(
-                params=self.actor.trainable_weights, loss=self.loss)
         if self.target_model_update < 1.:
             # Include soft target model updates.
-            updates += get_soft_target_model_updates(self.target_actor, self.actor, self.target_model_update)
-        updates += self.actor.updates  # include other updates of the actor, e.g. for BN
-        # Finally, combine it all into a callable function.
-        self.actor_train_fn = K.function(state_inputs + [K.learning_phase()],
-                                             [self.actor(state_inputs)], updates=updates)
+            actor_updates = get_soft_target_model_updates(self.target_actor, self.actor, self.target_model_update)
 
+        self.actor_updated = actor_updates
         self.actor_optimizer = actor_optimizer
 
         self.compiled = True
 
-    def load_weights(self, filepath):
+    @tf.function
+    def actor_train_fn(self, state_inputs):
+
+        with tf.GradientTape() as tape:
+            actions = self.actor(state_inputs)
+            reward = self.target_critic([actions, state_inputs])
+            loss = - tf.reduce_mean(reward)
+
+        gradients = tape.gradient(loss, self.actor.trainable_variables)
+        self.actor_optimizer.apply_gradients(zip(gradients, self.actor.trainable_variables))
+
+        # apply all updates to the actor target
+        for update in self.actor_updated:
+                target, value_op = update
+                K.update(target, value_op)
+
+        return actions
+
+    def load_weights(self, fileparewardth):
         filename, extension = os.path.splitext(filepath)
         actor_filepath = filename + '_actor' + extension
         critic_filepath = filename + '_critic' + extension
@@ -190,9 +190,10 @@ class DDPGAgent(Agent):
             return batch
         return self.processor.process_state_batch(batch)
 
+    #@tf.function
     def select_action(self, state):
         batch = self.process_state_batch([state])
-        action = self.actor.predict_on_batch(batch).flatten()
+        action = tf.reshape(self.actor.predict_on_batch(batch), [self.nb_actions, ])
         assert action.shape == (self.nb_actions,)
 
         # Apply noise, if a random process is set.
@@ -216,7 +217,11 @@ class DDPGAgent(Agent):
 
     @property
     def layers(self):
-        return self.actor.layers[:] + self.critic.layers[:]
+        # check if actor and critic exists before returnin gtheir layers
+        if hasattr(self, 'actor') and hasattr(self, 'critic'):
+            return self.actor.layers[:] + self.critic.layers[:]
+        else:
+            return []
 
     @property
     def metrics_names(self):
@@ -275,7 +280,8 @@ class DDPGAgent(Agent):
                 else:
                     state1_batch_with_action = [state1_batch]
                 state1_batch_with_action.insert(self.critic_action_input_idx, target_actions)
-                target_q_values = self.target_critic.predict_on_batch(state1_batch_with_action).flatten()
+                target_q_values = tf.reshape(self.target_critic.predict_on_batch(state1_batch_with_action),
+                                             [self.batch_size,])
                 assert target_q_values.shape == (self.batch_size,)
 
                 # Compute r_t + gamma * max_a Q(s_t+1, a) and update the target ys accordingly,
@@ -283,7 +289,7 @@ class DDPGAgent(Agent):
                 discounted_reward_batch = self.gamma * target_q_values
                 discounted_reward_batch *= terminal1_batch
                 assert discounted_reward_batch.shape == reward_batch.shape
-                targets = (reward_batch + discounted_reward_batch).reshape(self.batch_size, 1)
+                targets = tf.reshape((reward_batch + discounted_reward_batch), (self.batch_size, 1))
 
                 # Perform a single batch update on the critic network.
                 if len(self.critic.inputs) >= 3:
@@ -302,9 +308,10 @@ class DDPGAgent(Agent):
                     inputs = state0_batch[:]
                 else:
                     inputs = [state0_batch]
-                if self.uses_learning_phase:
-                    inputs += [self.training]
-                action_values = self.actor_train_fn(inputs)[0]
+                # Todo: find out what this did!
+                #if self.uses_learning_phase:
+                #    inputs += [self.training]
+                action_values = self.actor_train_fn(inputs)
                 assert action_values.shape == (self.batch_size, self.nb_actions)
 
         if self.target_model_update >= 1 and self.step % self.target_model_update == 0:
