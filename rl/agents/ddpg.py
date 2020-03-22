@@ -70,7 +70,9 @@ class DDPGAgent(Agent):
         self.critic_action_input = critic_action_input
         self.critic_action_input_idx = self.critic.input.index(critic_action_input)
         self.memory = memory
-        self.updates_list = None
+
+        self.actor_updates = []
+        self.critic_updates = []
 
         # State.
         self.compiled = False
@@ -121,15 +123,15 @@ class DDPGAgent(Agent):
         # Compile the critic.
         if self.target_model_update < 1.:
             # We use the `AdditionalUpdatesOptimizer` to efficiently soft-update the target model.
-            critic_updates = get_soft_target_model_updates(self.target_critic, self.critic, self.target_model_update)
-            critic_optimizer = AdditionalUpdatesOptimizer(critic_optimizer, critic_updates)
+            self.critic_updates = get_soft_target_model_updates(self.target_critic, self.critic, self.target_model_update)
+            #critic_optimizer = AdditionalUpdatesOptimizer(critic_optimizer, critic_updates)
         self.critic.compile(optimizer=critic_optimizer, loss=clipped_error, metrics=critic_metrics)
 
         if self.target_model_update < 1.:
             # Include soft target model updates.
             actor_updates = get_soft_target_model_updates(self.target_actor, self.actor, self.target_model_update)
 
-        self.actor_updated = actor_updates
+        self.actor_updates = actor_updates
         self.actor_optimizer = actor_optimizer
 
         self.compiled = True
@@ -145,11 +147,6 @@ class DDPGAgent(Agent):
         gradients = tape.gradient(loss, self.actor.trainable_variables)
         self.actor_optimizer.apply_gradients(zip(gradients, self.actor.trainable_variables))
 
-        # apply all updates to the actor target
-        for update in self.actor_updated:
-                target, value_op = update
-                K.update(target, value_op)
-
         return actions
 
     def load_weights(self, fileparewardth):
@@ -158,7 +155,7 @@ class DDPGAgent(Agent):
         critic_filepath = filename + '_critic' + extension
         self.actor.load_weights(actor_filepath)
         self.critic.load_weights(critic_filepath)
-        self.update_target_models_hard()
+        self._update_target_models_hard()
 
     def save_weights(self, filepath, overwrite=False):
         filename, extension = os.path.splitext(filepath)
@@ -167,7 +164,17 @@ class DDPGAgent(Agent):
         self.actor.save_weights(actor_filepath, overwrite=overwrite)
         self.critic.save_weights(critic_filepath, overwrite=overwrite)
 
-    def update_target_models_hard(self):
+    @tf.function
+    def _update_target_models(self):
+        # apply all updates to the actor target
+        for target, value_op in self.critic_updates:
+            K.update(target, value_op)
+
+        # apply all updates to the actor target
+        for target, value_op in self.actor_updates:
+            K.update(target, value_op)
+
+    def _update_target_models_hard(self):
         self.target_critic.set_weights(self.critic.get_weights())
         self.target_actor.set_weights(self.actor.get_weights())
 
@@ -314,7 +321,10 @@ class DDPGAgent(Agent):
                 action_values = self.actor_train_fn(inputs)
                 assert action_values.shape == (self.batch_size, self.nb_actions)
 
+            # update target networks
+            self._update_target_models()
+
         if self.target_model_update >= 1 and self.step % self.target_model_update == 0:
-            self.update_target_models_hard()
+            self._update_target_models_hard()
 
         return metrics
