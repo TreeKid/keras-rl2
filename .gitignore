@@ -8,3 +8,6 @@ examples/intro-to-rl.ipynb
 examples/checkpoint
 *.ipynb
 *.pyc
+
+**egg-info**
+.idea
