@@ -25,7 +25,8 @@ class DDPGAgent(Agent):
     def __init__(self, nb_actions, actor, critic, critic_action_input, memory,
                  gamma=.99, batch_size=32, nb_steps_warmup_critic=1000, nb_steps_warmup_actor=1000,
                  train_interval=1, memory_interval=1, delta_range=None, delta_clip=np.inf,
-                 random_process=None, custom_model_objects={}, target_model_update=.001, **kwargs):
+                 random_process=None, custom_model_objects={}, target_model_update=.001,
+                 tb_log_dir=None, tb_full_log=False, log_freq=10, **kwargs):
         if hasattr(actor.outputs, '__len__') and len(actor.outputs) > 1:
             raise ValueError('Actor "{}" has more than one output. DDPG expects an actor that has a single output.'.format(actor))
         if hasattr(critic.outputs, '__len__') and len(critic.outputs) > 1:
@@ -78,10 +79,16 @@ class DDPGAgent(Agent):
         self.compiled = False
         self.reset_states()
 
-    #@property
-    #def uses_learning_phase(self):
-    #    return  K.learning_phase()
-        #return self.actor.uses_learning_phase or self.critic.uses_learning_phase
+        # tensorflow log
+        self.tb_log_dir = tb_log_dir
+        self.tb_full_log = tb_full_log
+        self.log_freq = log_freq
+
+        if self.tb_log_dir:
+            train_log_dir = os.path.abspath(os.path.join(self.tb_log_dir, 'train'))
+            self.train_summary_writer = tf.summary.create_file_writer(train_log_dir)
+        else:
+            self.train_summary_writer = None
 
     def compile(self, optimizer, metrics=[]):
         metrics += [mean_q]
@@ -133,8 +140,25 @@ class DDPGAgent(Agent):
 
         self.actor_updates = actor_updates
         self.actor_optimizer = actor_optimizer
+        self.critic_optimizer = critic_optimizer
 
         self.compiled = True
+
+    @tf.function
+    def critic_train_fn(self, actions, state_inputs, true_reward):
+
+        def clipped_error(y_true, y_pred):
+            # Todo: mean over all or axis=-1?
+            return K.mean(huber_loss(y_true, y_pred, self.delta_clip))#, axis=-1)
+
+        with tf.GradientTape() as tape:
+            reward = self.critic([actions, state_inputs])
+            loss = clipped_error(true_reward, reward)
+
+        gradients = tape.gradient(loss, self.critic.trainable_variables)
+        self.critic_optimizer.apply_gradients(zip(gradients, self.critic.trainable_variables))
+
+        return reward, loss
 
     @tf.function
     def actor_train_fn(self, state_inputs):
@@ -147,7 +171,7 @@ class DDPGAgent(Agent):
         gradients = tape.gradient(loss, self.actor.trainable_variables)
         self.actor_optimizer.apply_gradients(zip(gradients, self.actor.trainable_variables))
 
-        return actions
+        return actions, loss
 
     def load_weights(self, filepath):
         filename, extension = os.path.splitext(filepath)
@@ -278,8 +302,10 @@ class DDPGAgent(Agent):
             assert terminal1_batch.shape == reward_batch.shape
             assert action_batch.shape == (self.batch_size, self.nb_actions)
 
-            # Update critic, if warm up is over.
+            # check if warm time is over
             if self.step > self.nb_steps_warmup_critic:
+                # Update critic
+                # -----------------------
                 target_actions = self.target_actor.predict_on_batch(state1_batch)
                 assert target_actions.shape == (self.batch_size, self.nb_actions)
                 if len(self.critic.inputs) >= 3:
@@ -304,13 +330,17 @@ class DDPGAgent(Agent):
                 else:
                     state0_batch_with_action = [state0_batch]
                 state0_batch_with_action.insert(self.critic_action_input_idx, action_batch)
-                metrics = self.critic.train_on_batch(state0_batch_with_action, targets)
+
+                #metrics = self.critic.train_on_batch(state0_batch_with_action, targets)
+                predicted_reward, critic_loss = self.critic_train_fn(*state0_batch_with_action, targets)
+
+                # Todo: see what to do with these dummy metrics
+                metrics = [np.nan for _ in self.metrics_names]
                 if self.processor is not None:
                     metrics += self.processor.metrics
 
-            # Update actor, if warm up is over.
-            if self.step > self.nb_steps_warmup_actor:
-                # TODO: implement metrics for actor
+                # Update actor
+                # ---------------------------------------
                 if len(self.actor.inputs) >= 2:
                     inputs = state0_batch[:]
                 else:
@@ -318,11 +348,21 @@ class DDPGAgent(Agent):
                 # Todo: find out what this did!
                 #if self.uses_learning_phase:
                 #    inputs += [self.training]
-                action_values = self.actor_train_fn(inputs)
+                action_values, action_loss = self.actor_train_fn(inputs)
                 assert action_values.shape == (self.batch_size, self.nb_actions)
 
-            # update target networks
-            self._update_target_models()
+                # update target networks
+                self._update_target_models()
+
+                # log to tensorboard
+                if self.tb_log_dir and self.step % self.log_freq == 0:
+                    with self.train_summary_writer.as_default():
+                        tf.summary.scalar('reward', reward, step=self.step)
+                        tf.summary.scalar('actor_loss', action_loss, step=self.step)
+                        tf.summary.scalar('critic_loss', critic_loss, step=self.step)
+
+                        if self.tb_full_log:
+                            pass
 
         if self.target_model_update >= 1 and self.step % self.target_model_update == 0:
             self._update_target_models_hard()
