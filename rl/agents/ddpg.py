@@ -224,7 +224,7 @@ class DDPGAgent(Agent):
     #@tf.function
     def select_action(self, state):
         batch = self.process_state_batch([state])
-        action = tf.reshape(self.actor.predict_on_batch(batch), [self.nb_actions, ])
+        action = tf.reshape(self.actor(batch), [self.nb_actions, ])
         assert action.shape == (self.nb_actions,)
 
         # Apply noise, if a random process is set.
@@ -233,7 +233,7 @@ class DDPGAgent(Agent):
             assert noise.shape == action.shape
             action += noise
 
-        return action
+        return action.numpy()
 
     def forward(self, observation):
         # Select an action.
