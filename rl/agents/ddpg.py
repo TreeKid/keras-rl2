@@ -84,10 +84,18 @@ class DDPGAgent(Agent):
         self.tb_full_log = tb_full_log
         self.log_freq = log_freq
 
-        if self.tb_log_dir:
+    @property
+    def tb_log_dir(self):
+        return self._tb_log_dir
+
+    @tb_log_dir.setter
+    def tb_log_dir(self, value):
+        if value is not None and isinstance(value, str):
+            self._tb_log_dir = value
             train_log_dir = os.path.abspath(os.path.join(self.tb_log_dir, 'train'))
             self.train_summary_writer = tf.summary.create_file_writer(train_log_dir)
         else:
+            self._tb_log_dir = None
             self.train_summary_writer = None
 
     def compile(self, optimizer, metrics=[]):
