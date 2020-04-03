@@ -44,6 +44,7 @@ class Agent(tf.keras.Model):
         self.processor = processor
         self.training = False
         self.step = 0
+        self.training_steps = 0
 
     def get_config(self):
         """Configuration of the agent for serialization.
@@ -177,10 +178,10 @@ class Agent(tf.keras.Model):
                 done = False
                 for _ in range(action_repetition):
                     callbacks.on_action_begin(action)
-                    observation, r, done, info = env.step(action)
+                    observation, reward, done, info = env.step(action)
                     observation = deepcopy(observation)
                     if self.processor is not None:
-                        observation, r, done, info = self.processor.process_step(observation, r, done, info)
+                        observation, reward, done, info = self.processor.process_step(observation, reward, done, info)
                     for key, value in info.items():
                         if not np.isreal(value):
                             continue
@@ -188,7 +189,7 @@ class Agent(tf.keras.Model):
                             accumulated_info[key] = np.zeros_like(value)
                         accumulated_info[key] += value
                     callbacks.on_action_end(action)
-                    reward += r
+                    #reward += r
                     if done:
                         break
                 if nb_max_episode_steps and episode_step >= nb_max_episode_steps - 1:
@@ -208,6 +209,7 @@ class Agent(tf.keras.Model):
                 callbacks.on_step_end(episode_step, step_logs)
                 episode_step += 1
                 self.step += 1
+                self.training_steps += 1
 
                 if done:
                     # We are in a terminal state but the agent hasn't yet seen it. We therefore

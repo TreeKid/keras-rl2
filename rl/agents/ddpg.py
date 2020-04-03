@@ -22,6 +22,10 @@ def mean_q(y_true, y_pred):
 class DDPGAgent(Agent):
     """Write me
     """
+
+    action_max = 1
+    action_min = -1
+
     def __init__(self, nb_actions, actor, critic, critic_action_input, memory,
                  gamma=.99, batch_size=32, nb_steps_warmup_critic=1000, nb_steps_warmup_actor=1000,
                  train_interval=1, memory_interval=1, delta_range=None, delta_clip=np.inf,
@@ -241,6 +245,8 @@ class DDPGAgent(Agent):
             assert noise.shape == action.shape
             action += noise
 
+        action = tf.clip_by_value(action, self.action_min, self.action_max)
+
         return action.numpy()
 
     def forward(self, observation):
@@ -251,6 +257,14 @@ class DDPGAgent(Agent):
         # Book-keeping.
         self.recent_observation = observation
         self.recent_action = action
+
+        # log to tensorboard
+        if self.tb_log_dir and self.step % self.log_freq == 0:
+            with self.train_summary_writer.as_default():
+
+                if self.tb_full_log:
+                    tf.summary.histogram('observation', observation, step=self.training_steps)
+                    tf.summary.histogram('action', action, step=self.training_steps)
 
         return action
 
@@ -365,9 +379,9 @@ class DDPGAgent(Agent):
                 # log to tensorboard
                 if self.tb_log_dir and self.step % self.log_freq == 0:
                     with self.train_summary_writer.as_default():
-                        tf.summary.scalar('reward', reward, step=self.step)
-                        tf.summary.scalar('actor_loss', action_loss, step=self.step)
-                        tf.summary.scalar('critic_loss', critic_loss, step=self.step)
+                        tf.summary.scalar('reward', reward, step=self.training_steps)
+                        tf.summary.scalar('actor_loss', action_loss, step=self.training_steps)
+                        tf.summary.scalar('critic_loss', critic_loss, step=self.training_steps)
 
                         if self.tb_full_log:
                             pass
