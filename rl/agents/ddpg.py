@@ -29,8 +29,11 @@ class DDPGAgent(Agent):
     def __init__(self, nb_actions, actor, critic, critic_action_input, memory,
                  gamma=.99, batch_size=32, nb_steps_warmup_critic=1000, nb_steps_warmup_actor=1000,
                  train_interval=1, memory_interval=1, delta_range=None, delta_clip=np.inf,
-                 random_process=None, custom_model_objects={}, target_model_update=.001,
+                 random_process=None, custom_model_objects={}, target_model_update=.001, random_exploration=0,
                  tb_log_dir=None, tb_full_log=False, log_freq=10, **kwargs):
+        """
+        :param random_exploration: probability for a completely random action.
+        """
         if hasattr(actor.outputs, '__len__') and len(actor.outputs) > 1:
             raise ValueError('Actor "{}" has more than one output. DDPG expects an actor that has a single output.'.format(actor))
         if hasattr(critic.outputs, '__len__') and len(critic.outputs) > 1:
@@ -68,6 +71,7 @@ class DDPGAgent(Agent):
         self.train_interval = train_interval
         self.memory_interval = memory_interval
         self.custom_model_objects = custom_model_objects
+        self.random_exploration = random_exploration
 
         # Related objects.
         self.actor = actor
@@ -165,7 +169,8 @@ class DDPGAgent(Agent):
 
         with tf.GradientTape() as tape:
             reward = self.critic([actions, state_inputs])
-            loss = clipped_error(true_reward, reward)
+            #loss = clipped_error(true_reward, reward)
+            loss = tf.abs(tf.reduce_mean(true_reward - reward))
 
         gradients = tape.gradient(loss, self.critic.trainable_variables)
         self.critic_optimizer.apply_gradients(zip(gradients, self.critic.trainable_variables))
@@ -252,7 +257,14 @@ class DDPGAgent(Agent):
     def forward(self, observation):
         # Select an action.
         state = self.memory.get_recent_state(observation)
-        action = self.select_action(state)  # TODO: move this into policy
+
+        # if training and by chance, select a completely random action
+        if self.training and np.random.rand() < self.random_exploration:
+            action = np.random.rand(self.nb_actions)
+            action *= self.action_max - self.action_min
+            action -= self.action_min
+        else:
+            action = self.select_action(state)  # TODO: move this into policy
 
         # Book-keeping.
         self.recent_observation = observation
